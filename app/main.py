@@ -65,6 +65,14 @@ async def analyze_stream(
         try:
             analyzer = LinkedInAnalyzer(config)
             async for event in analyzer.run_stream():
+                if event["type"] == "done":
+                    # Build and embed the HTML report so the client doesn't need a second request
+                    from .analyzer import Post
+                    posts = [
+                        Post(**{k: v for k, v in d.items() if k in Post.__dataclass_fields__})
+                        for d in event["posts"]
+                    ]
+                    event["html"] = build_report(posts, event["summary"], config)
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
