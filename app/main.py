@@ -173,18 +173,71 @@ def _print_event(event: dict) -> None:
         print(f"\n❌ {msg}", file=sys.stderr)
 
 
-def _save_report(event: dict, config: AnalysisConfig, output_path: str) -> None:
-    from .analyzer import Post
-    posts_raw = event["posts"]
-    summary = event["summary"]
-    posts = [Post(**{k: v for k, v in d.items() if k in Post.__dataclass_fields__})
-             for d in posts_raw]
+def _print_post_list(posts: list) -> None:
+    """Gibt alle analysierten Posts nummeriert in der Konsole aus."""
+    sep = "─" * 74
+    print(f"\n📋 {len(posts)} Posts gefunden:\n{sep}")
+    for i, p in enumerate(posts):
+        score_str = f"{p.sentiment_score:+.2f}"
+        text_preview = (p.text or "").replace("\n", " ")[:90]
+        ellipsis = "…" if len(p.text or "") > 90 else ""
+        title_part = f" · {p.author_title[:55]}" if p.author_title else ""
+        print(
+            f"\n  [{i+1:2d}]  {p.author}{title_part}\n"
+            f"        via \"{p.keyword}\"  |  "
+            f"👍 {p.likes}  💬 {p.comments}  🔁 {p.reposts}  |  "
+            f"{p.sentiment_post} ({score_str})\n"
+            f"        \"{text_preview}{ellipsis}\""
+        )
+    print(f"\n{sep}")
+
+
+def _prompt_exclusion(posts: list) -> list:
+    """Interaktive Post-Filterung.
+
+    Nutzer gibt kommagetrennte 1-basierte Nummern der auszuschließenden Posts ein.
+    Eingabe leer → alle Posts behalten. EOFError/KeyboardInterrupt → alle behalten.
+    """
+    print(
+        "Nicht relevante Posts ausschließen\n"
+        "(Nummern kommagetrennt, z.B. 2,5,8 – oder Enter zum Überspringen): ",
+        end="",
+        flush=True,
+    )
+    try:
+        raw = input().strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return posts
+
+    if not raw:
+        return posts
+
+    exclude: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if part.isdigit():
+            idx = int(part) - 1  # 1-basiert → 0-basiert
+            if 0 <= idx < len(posts):
+                exclude.add(idx)
+            else:
+                print(f"   ⚠️  Nummer {int(part)} außerhalb des gültigen Bereichs – ignoriert.")
+        elif part:
+            print(f"   ⚠️  \"{part}\" ist keine gültige Zahl – ignoriert.")
+
+    filtered = [p for i, p in enumerate(posts) if i not in exclude]
+    if exclude:
+        print(f"\n   ✂️  {len(exclude)} Post(s) ausgeschlossen → {len(filtered)} verbleiben.")
+    return filtered
+
+
+def _save_report(posts: list, summary: str, config: AnalysisConfig, output_path: str) -> None:
     html = build_report(posts, summary, config)
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(html, encoding="utf-8")
     print(f"\n✅ Report gespeichert : {out}")
-    print(f"   Posts analysiert  : {len(posts)}")
+    print(f"   Posts im Report   : {len(posts)}")
 
 
 # ── CLI-Mode ──────────────────────────────────────────────────────────────────
@@ -210,7 +263,19 @@ async def cli_main(args):
         if event["type"] in ("progress", "warning"):
             _print_event(event)
         elif event["type"] == "done":
-            _save_report(event, config, args.output)
+            from .analyzer import Post
+            posts = [
+                Post(**{k: v for k, v in d.items() if k in Post.__dataclass_fields__})
+                for d in event["posts"]
+            ]
+            summary = event["summary"]
+
+            # Interaktive Post-Überprüfung (nur wenn stdin ein Terminal ist)
+            if not args.no_review and sys.stdin.isatty():
+                _print_post_list(posts)
+                posts = _prompt_exclusion(posts)
+
+            _save_report(posts, summary, config, args.output)
         elif event["type"] == "error":
             _print_event(event)
             sys.exit(1)
@@ -250,7 +315,19 @@ async def debug_main(args):
         if event["type"] in ("progress", "warning"):
             _print_event(event)
         elif event["type"] == "done":
-            _save_report(event, config, args.output)
+            from .analyzer import Post
+            posts = [
+                Post(**{k: v for k, v in d.items() if k in Post.__dataclass_fields__})
+                for d in event["posts"]
+            ]
+            summary = event["summary"]
+
+            # Interaktive Post-Überprüfung (nur wenn stdin ein Terminal ist)
+            if not args.no_review and sys.stdin.isatty():
+                _print_post_list(posts)
+                posts = _prompt_exclusion(posts)
+
+            _save_report(posts, summary, config, args.output)
         elif event["type"] == "error":
             _print_event(event)
             sys.exit(1)
@@ -269,6 +346,8 @@ if __name__ == "__main__":
     cli.add_argument("--output", default="/output/report.html", help="Ausgabepfad des HTML-Reports")
     cli.add_argument("--save-cache", metavar="DIR",
                      help="Zwischenergebnisse in diesem Verzeichnis speichern (scrape_*.json + analysis_*.json)")
+    cli.add_argument("--no-review", action="store_true",
+                     help="Post-Überprüfungsschritt überspringen (alle Posts in Report aufnehmen)")
 
     # ── debug: Analyse aus Cache wiederholen (ohne API-Kosten) ────────────────
     dbg = sub.add_parser("debug", help="Report aus gespeichertem Cache erstellen (keine API-Kosten)")
@@ -278,6 +357,8 @@ if __name__ == "__main__":
     dbg_src.add_argument("--from-analysis", metavar="FILE",
                          help="Analysis-Cache laden → nur Report-Generierung, keine API-Aufrufe")
     dbg.add_argument("--output", default="/output/report.html", help="Ausgabepfad des HTML-Reports")
+    dbg.add_argument("--no-review", action="store_true",
+                     help="Post-Überprüfungsschritt überspringen (alle Posts in Report aufnehmen)")
 
     # ── serve: Web-Server ─────────────────────────────────────────────────────
     serve = sub.add_parser("serve", help="Web-Server starten")
