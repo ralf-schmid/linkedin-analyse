@@ -86,10 +86,14 @@ class ApifyClient:
 
     async def scrape_linkedin(
         self, keyword: str, config: AnalysisConfig, timeout: int = 180
-    ) -> list[dict]:
+    ) -> tuple[list[dict], dict]:
+        """Scrapt LinkedIn-Posts für ein einzelnes Keyword.
+
+        Gibt (posts, payload) zurück – payload für Diagnose-Logging.
+        """
         url = f"{self.BASE}/acts/{APIFY_ACTOR}/run-sync-get-dataset-items"
         # harvestapi~linkedin-post-search schema:
-        #   searchQueries (array), maxPosts, scrapeComments, scrapeReactions, maxReactions
+        #   searchQueries (array of strings), maxPosts, scrapeComments, scrapeReactions, maxReactions
         payload = {
             "searchQueries": [keyword],
             "maxPosts": config.max_posts_per_keyword,
@@ -105,7 +109,7 @@ class ApifyClient:
             )
             resp.raise_for_status()
             data = resp.json()
-            return data if isinstance(data, list) else [data]
+            return (data if isinstance(data, list) else [data]), payload
 
 
 class AnthropicClient:
@@ -423,7 +427,12 @@ class LinkedInAnalyzer:
                     "percent": int(10 + (i / len(config.keywords)) * 30),
                 }
                 try:
-                    raw_posts = await self._apify.scrape_linkedin(keyword, config)
+                    raw_posts, sent_payload = await self._apify.scrape_linkedin(keyword, config)
+                    yield {
+                        "type": "progress", "phase": "scraping",
+                        "message": f"  Apify-Payload: {json.dumps(sent_payload, ensure_ascii=False)}",
+                        "percent": int(10 + (i / len(config.keywords)) * 30),
+                    }
                 except httpx.HTTPStatusError as exc:
                     yield {"type": "warning", "message": f"Apify-Fehler für \"{keyword}\": {exc.response.status_code} – {exc.response.text[:200]}"}
                     continue

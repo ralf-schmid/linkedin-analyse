@@ -2,6 +2,7 @@
 HTML-Report-Generator – erzeugt den fertigen Analysebericht
 """
 
+import re
 from datetime import datetime
 from .analyzer import AnalysisConfig
 
@@ -14,6 +15,43 @@ def _esc(s: str) -> str:
         .replace(">", "&gt;")
         .replace('"', "&quot;")
         .replace("'", "&#39;")
+    )
+
+
+def _render_inline(text: str) -> str:
+    """Escaped den Text und rendert Inline-Markdown: **fett** → <strong>."""
+    text = _esc(text)
+    text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+    return text
+
+
+def _parse_table(rows: list[str]) -> str:
+    """Wandelt gesammelte Markdown-Tabellenzeilen in eine HTML-Tabelle um."""
+
+    def split_cells(row: str) -> list[str]:
+        return [c.strip() for c in row.strip("|").split("|")]
+
+    def is_separator(row: str) -> bool:
+        return bool(re.fullmatch(r'[\|:\- ]+', row.strip()))
+
+    if not rows:
+        return ""
+
+    header_cells = split_cells(rows[0])
+    thead = "<tr>" + "".join(f"<th>{_render_inline(c)}</th>" for c in header_cells) + "</tr>"
+
+    tbody = ""
+    for row in rows[1:]:
+        if is_separator(row):
+            continue
+        cells = split_cells(row)
+        tbody += "<tr>" + "".join(f"<td>{_render_inline(c)}</td>" for c in cells) + "</tr>"
+
+    return (
+        '<table class="summary-table">'
+        f"<thead>{thead}</thead>"
+        f"<tbody>{tbody}</tbody>"
+        "</table>"
     )
 
 
@@ -48,19 +86,43 @@ def _format_date(iso: str) -> str:
 
 
 def _summary_to_html(text: str) -> str:
-    """Markdown-ähnliche Formatierung für den Summary-Text."""
+    """Wandelt Markdown-Summary in HTML um.
+
+    Unterstützt: ## / ### Überschriften, | Tabellen |, **fett**, Absätze.
+    """
     lines = text.split("\n")
     out = []
-    for line in lines:
-        line = line.strip()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+
         if not line:
             out.append("<br>")
-        elif line.startswith("## "):
-            out.append(f'<h3 class="sum-h3">{_esc(line[3:])}</h3>')
-        elif line.startswith("### "):
-            out.append(f'<h4 class="sum-h4">{_esc(line[4:])}</h4>')
-        else:
-            out.append(f"<p>{_esc(line)}</p>")
+            i += 1
+            continue
+
+        if line.startswith("## "):
+            out.append(f'<h3 class="sum-h3">{_render_inline(line[3:])}</h3>')
+            i += 1
+            continue
+
+        if line.startswith("### "):
+            out.append(f'<h4 class="sum-h4">{_render_inline(line[4:])}</h4>')
+            i += 1
+            continue
+
+        # Tabelle: aufeinanderfolgende Zeilen, die mit | beginnen
+        if line.startswith("|"):
+            table_rows = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                table_rows.append(lines[i].strip())
+                i += 1
+            out.append(_parse_table(table_rows))
+            continue
+
+        out.append(f"<p>{_render_inline(line)}</p>")
+        i += 1
+
     return "\n".join(out)
 
 
@@ -109,6 +171,14 @@ a:hover{text-decoration:underline}
 .sum-h3{font-size:15px;color:var(--li-blue);margin:20px 0 8px;font-weight:700}
 .sum-h4{font-size:14px;color:var(--text);margin:12px 0 6px;font-weight:600}
 .section p{line-height:1.75;color:#374151;margin-bottom:6px}
+
+/* Summary-Tabellen */
+.summary-table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13px;border-radius:8px;overflow:hidden;box-shadow:var(--shadow)}
+.summary-table thead{background:var(--li-blue);color:#fff}
+.summary-table th{padding:9px 14px;text-align:left;font-weight:600;white-space:nowrap}
+.summary-table td{padding:8px 14px;border-bottom:1px solid var(--border);color:#374151}
+.summary-table tbody tr:nth-child(even){background:#f8fafc}
+.summary-table tbody tr:hover{background:#eff6ff}
 
 /* Badge */
 .badge{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;

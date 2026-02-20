@@ -363,15 +363,16 @@ class TestCache:
         config = AnalysisConfig(keywords=["AI"], cache_dir=str(tmp_path))
         analyzer = LinkedInAnalyzer(config)
 
-        # Mock Apify + Claude
+        mock_post = {
+            "id": "1",
+            "commentary": "Langer Testbeitrag mit ausreichend Inhalt.",
+            "actor": {"name": "Test"},
+            "numComments": 0, "numShares": 0,
+            "reactionTypeCounts": [],
+        }
+        # Mock Apify + Claude – scrape_linkedin gibt jetzt (posts, payload) zurück
         with patch.object(analyzer._apify, "scrape_linkedin",
-                          new=AsyncMock(return_value=[{
-                              "id": "1",
-                              "commentary": "Langer Testbeitrag mit ausreichend Inhalt.",
-                              "actor": {"name": "Test"},
-                              "numComments": 0, "numShares": 0,
-                              "reactionTypeCounts": [],
-                          }])), \
+                          new=AsyncMock(return_value=([mock_post], {"searchQueries": ["AI"]}))), \
              patch.object(analyzer._claude, "_post",
                           new=AsyncMock(return_value=json.dumps(sentiment_result))):
             events = [e async for e in analyzer.run_stream()]
