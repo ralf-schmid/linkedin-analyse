@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LinkedIn Post Analyzer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet">
+
+<style>
+:root {
+  --li:        #0a66c2;
+  --li-glow:   rgba(10,102,194,.35);
+  --bg:        #080e1a;
+  --surface:   #0f1827;
+  --surface2:  #152035;
+  --border:    rgba(255,255,255,.08);
+  --text:      #e2eaf4;
+  --muted:     #6b82a8;
+  --accent:    #38bdf8;
+  --success:   #22d3a0;
+  --warn:      #f59e0b;
+  --error:     #f87171;
+  --r:         12px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'DM Sans', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  line-height: 1.6;
+}
+
+/* ── Layout ─────────────────────────────────────── */
+.shell {
+  display: grid;
+  grid-template-columns: 380px 1fr;
+  min-height: 100vh;
+}
+
+/* ── Sidebar ─────────────────────────────────────── */
+.sidebar {
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  padding: 36px 28px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 36px;
+}
+.logo-mark {
+  width: 38px; height: 38px;
+  background: var(--li);
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 20px;
+  flex-shrink: 0;
+  box-shadow: 0 0 18px var(--li-glow);
+}
+.logo-text { font-family: 'Syne', sans-serif; font-size: 15px; font-weight: 800; letter-spacing: -.3px; }
+.logo-sub  { font-size: 11px; color: var(--muted); margin-top: 1px; font-family: 'DM Mono', monospace; }
+
+/* Form */
+.form-group { margin-bottom: 22px; }
+label { display: block; font-size: 12px; font-weight: 500; color: var(--muted);
+  letter-spacing: .06em; text-transform: uppercase; margin-bottom: 7px; }
+
+input[type="text"],
+input[type="number"],
+select {
+  width: 100%;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  color: var(--text);
+  font-family: 'DM Sans', sans-serif;
+  font-size: 14px;
+  padding: 11px 14px;
+  outline: none;
+  transition: border-color .2s, box-shadow .2s;
+}
+input:focus, select:focus {
+  border-color: var(--li);
+  box-shadow: 0 0 0 3px var(--li-glow);
+}
+select option { background: var(--surface2); }
+
+.keyword-hint { font-size: 11px; color: var(--muted); margin-top: 6px; font-family: 'DM Mono', monospace; }
+
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+
+/* Toggle */
+.toggle-wrap { display: flex; align-items: center; gap: 10px; }
+.toggle {
+  width: 44px; height: 24px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  cursor: pointer;
+  position: relative;
+  transition: background .2s;
+  flex-shrink: 0;
+}
+.toggle.on { background: var(--li); border-color: var(--li); }
+.toggle::after {
+  content: '';
+  position: absolute;
+  top: 3px; left: 3px;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform .2s;
+}
+.toggle.on::after { transform: translateX(20px); }
+.toggle-label { font-size: 13px; color: var(--text); }
+
+/* Submit */
+.btn-run {
+  width: 100%;
+  padding: 13px;
+  background: var(--li);
+  border: none;
+  border-radius: var(--r);
+  color: #fff;
+  font-family: 'Syne', sans-serif;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  margin-top: 8px;
+  transition: background .2s, transform .1s, box-shadow .2s;
+  box-shadow: 0 0 24px var(--li-glow);
+  letter-spacing: .3px;
+}
+.btn-run:hover:not(:disabled) {
+  background: #0959ae;
+  box-shadow: 0 0 32px var(--li-glow);
+  transform: translateY(-1px);
+}
+.btn-run:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+
+.divider { height: 1px; background: var(--border); margin: 24px 0; }
+
+/* Info box */
+.info-box {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 14px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.7;
+  margin-top: auto;
+}
+.info-box strong { color: var(--accent); }
+
+/* ── Main ─────────────────────────────────────── */
+.main {
+  padding: 36px 40px;
+  display: flex;
+  flex-direction: column;
+}
+
+.welcome {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 60px 40px;
+}
+.welcome h2 { font-family: 'Syne', sans-serif; font-size: 28px; font-weight: 800;
+  color: var(--text); margin-bottom: 14px; }
+.welcome p { color: var(--muted); font-size: 15px; max-width: 480px; line-height: 1.8; }
+.welcome .features {
+  display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-top: 36px;
+}
+.feature-chip {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 6px 14px;
+  font-size: 13px;
+  color: var(--muted);
+  display: flex; align-items: center; gap: 7px;
+}
+
+/* Progress */
+.progress-wrap { display: none; flex-direction: column; gap: 0; }
+.progress-wrap.visible { display: flex; }
+
+.progress-header {
+  display: flex; align-items: center; gap: 12px; margin-bottom: 24px;
+}
+.progress-header h3 { font-family: 'Syne', sans-serif; font-size: 18px; font-weight: 800; }
+
+.progress-bar-outer {
+  height: 6px; background: var(--surface2);
+  border-radius: 3px; overflow: hidden; margin-bottom: 24px;
+  border: 1px solid var(--border);
+}
+.progress-bar-inner {
+  height: 100%; background: var(--li);
+  border-radius: 3px;
+  transition: width .4s ease;
+  box-shadow: 0 0 8px var(--li-glow);
+  width: 0%;
+}
+
+.log-wrap {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 20px;
+  flex: 1;
+  overflow-y: auto;
+  max-height: 55vh;
+  font-family: 'DM Mono', monospace;
+  font-size: 12px;
+}
+.log-entry {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  display: flex; gap: 12px; align-items: flex-start;
+  animation: fadeIn .3s ease;
+}
+.log-entry:last-child { border-bottom: none; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+.log-time { color: var(--muted); flex-shrink: 0; font-size: 11px; padding-top: 1px; }
+.log-msg  { color: var(--text); line-height: 1.5; }
+.log-msg.warn  { color: var(--warn); }
+.log-msg.error { color: var(--error); }
+.log-msg.done  { color: var(--success); font-weight: 500; }
+
+/* Result */
+.result-wrap { display: none; flex-direction: column; gap: 18px; }
+.result-wrap.visible { display: flex; }
+
+.result-header {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+}
+.result-title { font-family: 'Syne', sans-serif; font-size: 18px; font-weight: 800; }
+.btn-download {
+  padding: 9px 18px;
+  background: var(--success);
+  border: none; border-radius: var(--r);
+  color: #0a2a1f; font-weight: 700; font-size: 13px;
+  cursor: pointer; text-decoration: none;
+  display: inline-flex; align-items: center; gap: 7px;
+  transition: opacity .2s;
+}
+.btn-download:hover { opacity: .85; }
+.btn-new {
+  padding: 9px 18px;
+  background: transparent;
+  border: 1px solid var(--border); border-radius: var(--r);
+  color: var(--muted); font-size: 13px;
+  cursor: pointer;
+  transition: border-color .2s, color .2s;
+}
+.btn-new:hover { border-color: var(--text); color: var(--text); }
+
+.report-frame {
+  flex: 1;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: #fff;
+  min-height: 70vh;
+  width: 100%;
+}
+
+/* Responsive */
+@media (max-width: 860px) {
+  .shell { grid-template-columns: 1fr; }
+  .sidebar { position: static; height: auto; }
+  .main { padding: 24px 20px; }
+}
+</style>
+</head>
+<body>
+
+<div class="shell">
+
+  <!-- ── Sidebar ── -->
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="logo-mark">🔍</div>
+      <div>
+        <div class="logo-text">LinkedIn Analyzer</div>
+        <div class="logo-sub">powered by Apify + Claude</div>
+      </div>
+    </div>
+
+    <form id="analyzeForm">
+      <div class="form-group">
+        <label>Suchbegriffe</label>
+        <input type="text" name="keywords" id="keywords"
+          placeholder="Agentic AI, KI Plattform, DSI"
+          value="" required>
+        <div class="keyword-hint">Mehrere Begriffe kommagetrennt</div>
+      </div>
+
+      <div class="row2">
+        <div class="form-group">
+          <label>Zeitraum</label>
+          <select name="days" id="days">
+            <option value="7">7 Tage</option>
+            <option value="14">14 Tage</option>
+            <option value="30">30 Tage</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Max. Posts / Keyword</label>
+          <input type="number" name="max_posts" id="maxPosts"
+            value="25" min="5" max="100">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Optionen</label>
+        <div class="toggle-wrap">
+          <div class="toggle on" id="commentsToggle"></div>
+          <span class="toggle-label">Kommentare einschließen</span>
+          <input type="hidden" name="include_comments" id="includeComments" value="true">
+        </div>
+      </div>
+
+      <button type="submit" class="btn-run" id="runBtn">
+        ▶ Analyse starten
+      </button>
+    </form>
+
+    <div class="divider"></div>
+
+    <div class="info-box">
+      <strong>Kosten pro Auswertung</strong><br>
+      Apify Scraping: ~0,50–1,50 €<br>
+      Claude Haiku (Sentiment): ~0,10–0,30 €<br>
+      Claude Sonnet (Summary): ~0,05–0,15 €<br>
+      <br>
+      <strong>Keine Fixkosten</strong> – zahle nur bei Nutzung.
+    </div>
+  </aside>
+
+  <!-- ── Main ── -->
+  <main class="main">
+
+    <!-- Welcome -->
+    <div class="welcome" id="welcomeView">
+      <h2>LinkedIn-Diskussionen verstehen</h2>
+      <p>Gib Suchbegriffe ein und erhalte eine KI-gestützte Analyse aller relevanten Posts der letzten Tage – inklusive Sentiment-Bewertung, Engagement-Metriken und Executive Summary.</p>
+      <div class="features">
+        <div class="feature-chip">🔍 Keyword-Scraping</div>
+        <div class="feature-chip">🧹 Automatische Deduplizierung</div>
+        <div class="feature-chip">🤖 Sentiment-Analyse</div>
+        <div class="feature-chip">📊 Executive Summary</div>
+        <div class="feature-chip">💾 HTML-Report-Download</div>
+      </div>
+    </div>
+
+    <!-- Progress -->
+    <div class="progress-wrap" id="progressView">
+      <div class="progress-header">
+        <div style="font-size:24px">⏳</div>
+        <h3>Analyse läuft …</h3>
+      </div>
+      <div class="progress-bar-outer">
+        <div class="progress-bar-inner" id="progressBar"></div>
+      </div>
+      <div class="log-wrap" id="logWrap"></div>
+    </div>
+
+    <!-- Result -->
+    <div class="result-wrap" id="resultView">
+      <div class="result-header">
+        <div class="result-title">✅ Analyse abgeschlossen</div>
+        <div style="display:flex;gap:10px">
+          <a id="downloadBtn" class="btn-download" download>⬇ Report herunterladen</a>
+          <button class="btn-new" id="newBtn">+ Neue Analyse</button>
+        </div>
+      </div>
+      <iframe class="report-frame" id="reportFrame" title="LinkedIn Analyse Report"></iframe>
+    </div>
+
+  </main>
+</div>
+
+<script>
+// Toggle
+const toggleEl = document.getElementById('commentsToggle');
+const hiddenEl = document.getElementById('includeComments');
+toggleEl.addEventListener('click', () => {
+  toggleEl.classList.toggle('on');
+  hiddenEl.value = toggleEl.classList.contains('on') ? 'true' : 'false';
+});
+
+// Views
+const views = {
+  welcome:  document.getElementById('welcomeView'),
+  progress: document.getElementById('progressView'),
+  result:   document.getElementById('resultView'),
+};
+function showView(name) {
+  Object.entries(views).forEach(([k, el]) => {
+    el.style.display = k === name ? '' : 'none';
+    el.classList.toggle('visible', k === name);
+  });
+}
+
+// Log
+const logWrap = document.getElementById('logWrap');
+function addLog(msg, type = '') {
+  const now = new Date().toLocaleTimeString('de-DE', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const el = document.createElement('div');
+  el.className = 'log-entry';
+  el.innerHTML = `<span class="log-time">${now}</span><span class="log-msg ${type}">${escHtml(msg)}</span>`;
+  logWrap.appendChild(el);
+  logWrap.scrollTop = logWrap.scrollHeight;
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// Progress bar
+const progressBar = document.getElementById('progressBar');
+function setProgress(pct) {
+  progressBar.style.width = Math.min(100, pct) + '%';
+}
+
+// Form submit
+document.getElementById('analyzeForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById('runBtn');
+  btn.disabled = true;
+  logWrap.innerHTML = '';
+  setProgress(0);
+  showView('progress');
+
+  const fd = new FormData(e.target);
+
+  try {
+    const resp = await fetch('/analyze/stream', { method: 'POST', body: fd });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let reportHtml = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop(); // letzte unvollständige Zeile aufheben
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        let ev;
+        try { ev = JSON.parse(line.slice(6)); } catch { continue; }
+
+        if (ev.type === 'progress') {
+          addLog(ev.message);
+          setProgress(ev.percent || 0);
+        } else if (ev.type === 'warning') {
+          addLog('⚠ ' + ev.message, 'warn');
+        } else if (ev.type === 'error') {
+          addLog('✗ ' + ev.message, 'error');
+          btn.disabled = false;
+          return;
+        } else if (ev.type === 'done') {
+          addLog('✓ ' + ev.message, 'done');
+          setProgress(100);
+          // Report direkt im Event – als HTML-String anfordern
+          await fetchAndShowReport(fd);
+        }
+      }
+    }
+  } catch (err) {
+    addLog('Verbindungsfehler: ' + err.message, 'error');
+  }
+  btn.disabled = false;
+});
+
+async function fetchAndShowReport(fd) {
+  // Synchronen Endpoint für den Report-HTML aufrufen
+  const resp = await fetch('/analyze', { method: 'POST', body: fd });
+  if (!resp.ok) { addLog('Report-Abruf fehlgeschlagen: ' + resp.status, 'error'); return; }
+  const html = await resp.text();
+
+  // In iframe laden
+  const frame = document.getElementById('reportFrame');
+  const blob = new Blob([html], { type: 'text/html' });
+  const url  = URL.createObjectURL(blob);
+  frame.src  = url;
+
+  // Download-Button
+  const dlBtn = document.getElementById('downloadBtn');
+  dlBtn.href = url;
+  dlBtn.download = `LinkedIn_Analyse_${new Date().toISOString().slice(0,10)}.html`;
+
+  showView('result');
+}
+
+// Neue Analyse
+document.getElementById('newBtn').addEventListener('click', () => {
+  document.getElementById('runBtn').disabled = false;
+  showView('welcome');
+});
+</script>
+</body>
+</html>

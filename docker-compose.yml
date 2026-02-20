@@ -1,0 +1,23 @@
+services:
+  linkedin-analyzer:
+    build: .
+    image: linkedin-analyzer:latest
+    container_name: linkedin-analyzer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # ── API Keys ── Werte in .env setzen, nie direkt hier eintragen!
+      - APIFY_TOKEN=${APIFY_TOKEN}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      # ── Optional: alternativer Apify Actor ──
+      # - APIFY_ACTOR=jiri.spilka~linkedin-post-scraper
+    volumes:
+      # CLI-Reports landen hier (optional, nur für --output /output/... relevant)
+      - ./output:/output
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
