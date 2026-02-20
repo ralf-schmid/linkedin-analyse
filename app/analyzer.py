@@ -67,7 +67,7 @@ ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 # Apify Actor – alternatives: "jiri.spilka~linkedin-post-scraper"
 APIFY_ACTOR = os.environ.get(
-    "APIFY_ACTOR", "curious_coder~linkedin-post-search-scraper"
+    "APIFY_ACTOR", "harvestapi~linkedin-post-search"
 )
 CLAUDE_HAIKU = "claude-haiku-4-5-20251001"
 CLAUDE_SONNET = "claude-sonnet-4-6"
