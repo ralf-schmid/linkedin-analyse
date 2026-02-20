@@ -10,6 +10,11 @@ services:
       # ── API Keys ── Werte in .env setzen, nie direkt hier eintragen!
       - APIFY_TOKEN=${APIFY_TOKEN}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      # ── Web-UI Zugriffsschutz (HTTP Basic Auth) ──
+      # Beide Variablen müssen gesetzt sein, damit Auth aktiv ist.
+      # Ohne diese Variablen ist das Frontend ohne Login erreichbar.
+      - WEB_USER=${WEB_USER}
+      - WEB_PASSWORD=${WEB_PASSWORD}
       # ── Optional: alternativer Apify Actor ──
       # - APIFY_ACTOR=jiri.spilka~linkedin-post-scraper
     volumes:

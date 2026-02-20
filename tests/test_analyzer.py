@@ -208,6 +208,80 @@ class TestNormalizePost:
         assert post.comments == 0
         assert post.reposts == 0
 
+    def test_harvestapi_schema(self):
+        """Prüft vollständige Kompatibilität mit harvestapi~linkedin-post-search Output."""
+        raw = {
+            "id": "urn:li:activity:123456",
+            "commentary": "Sehr interessanter Beitrag über KI-Trends im B2B-Bereich mit vielen Details.",
+            "actor": {
+                "name": "Dr. Anna Schmidt",
+                "position": "Head of AI @ Contoso",
+                "linkedinUrl": "https://linkedin.com/in/anna-schmidt",
+            },
+            "postedAt": {
+                "date": "2025-05-15T09:30:00Z",
+                "timestamp": 1747294200,
+                "postedAgoShort": "2d",
+                "postedAgoText": "2 days ago",
+            },
+            "numComments": 42,
+            "numShares": 18,
+            "reactionTypeCounts": [
+                {"type": "LIKE", "count": 150},
+                {"type": "EMPATHY", "count": 30},
+                {"type": "PRAISE", "count": 10},
+            ],
+            "linkedinUrl": "https://linkedin.com/posts/anna-schmidt_123456",
+        }
+        post = self.analyzer._normalize_post(raw, "KI")
+        assert post is not None
+        assert post.author == "Dr. Anna Schmidt"
+        assert post.author_title == "Head of AI @ Contoso"
+        assert post.author_url == "https://linkedin.com/in/anna-schmidt"
+        assert post.text == raw["commentary"]
+        assert post.posted_at == "2025-05-15T09:30:00Z"
+        assert post.likes == 190  # 150 + 30 + 10
+        assert post.comments == 42
+        assert post.reposts == 18
+        assert post.url == raw["linkedinUrl"]
+        assert post.keyword == "KI"
+
+    def test_harvestapi_comments_schema(self):
+        """Prüft Kommentar-Normalisierung für harvestapi (actor.name + commentary)."""
+        raw = {
+            "id": "urn:li:activity:999",
+            "commentary": "Langer Testbeitrag mit ausreichend Text für die Mindestlänge hier.",
+            "actor": {"name": "Test Autor"},
+            "numComments": 2,
+            "numShares": 0,
+            "reactionTypeCounts": [],
+            "comments": [
+                {"actor": {"name": "Kommentierer A"}, "commentary": "Super Beitrag!"},
+                {"actor": {"name": "Kommentierer B"}, "commentary": "Stimme zu."},
+            ],
+        }
+        post = self.analyzer._normalize_post(raw, "AI")
+        assert post is not None
+        assert len(post.comments_list) == 2
+        assert post.comments_list[0]["author"] == "Kommentierer A"
+        assert post.comments_list[0]["text"] == "Super Beitrag!"
+        assert post.comments_list[1]["author"] == "Kommentierer B"
+
+    def test_harvestapi_postedat_as_string_still_works(self):
+        """Fallback: postedAt als String (ältere Actors) bleibt kompatibel."""
+        raw = {
+            "id": "str-date",
+            "commentary": "Beitrag mit String-Datum – ausreichend Text für den Mindestcheck.",
+            "actor": {"name": "User"},
+            "numComments": 0,
+            "numShares": 0,
+            "postedAt": "2025-04-01T00:00:00Z",
+            "reactionTypeCounts": [],
+        }
+        post = self.analyzer._normalize_post(raw, "AI")
+        assert post is not None
+        assert post.posted_at == "2025-04-01T00:00:00Z"
+
 
 # ── AnthropicClient (gemockt) ─────────────────────────────────────────────────
 

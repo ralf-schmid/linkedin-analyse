@@ -65,9 +65,9 @@ class Post:
 APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
-# Apify Actor – alternatives: "jiri.spilka~linkedin-post-scraper"
+# Apify Actor – Standard: harvestapi~linkedin-post-search
 APIFY_ACTOR = os.environ.get(
-    "APIFY_ACTOR", "curious_coder~linkedin-post-search-scraper"
+    "APIFY_ACTOR", "harvestapi~linkedin-post-search"
 )
 CLAUDE_HAIKU = "claude-haiku-4-5-20251001"
 CLAUDE_SONNET = "claude-sonnet-4-6"
@@ -83,11 +83,14 @@ class ApifyClient:
         self, keyword: str, config: AnalysisConfig, timeout: int = 180
     ) -> list[dict]:
         url = f"{self.BASE}/acts/{APIFY_ACTOR}/run-sync-get-dataset-items"
+        # harvestapi~linkedin-post-search schema:
+        #   searchQueries (array), maxPosts, scrapeComments, scrapeReactions, maxReactions
         payload = {
-            "searchKeywords": keyword,
-            "maxResults": config.max_posts_per_keyword,
-            "datePosted": config.apify_date_filter,
+            "searchQueries": [keyword],
+            "maxPosts": config.max_posts_per_keyword,
             "scrapeComments": config.include_comments,
+            "scrapeReactions": False,
+            "maxReactions": 5,
         }
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(
@@ -207,21 +210,33 @@ class LinkedInAnalyzer:
         self._claude = AnthropicClient(ANTHROPIC_KEY)
 
     def _normalize_post(self, raw: dict, keyword: str) -> Optional[Post]:
-        """Verschiedene Apify-Actor-Schemas normalisieren."""
-        text = raw.get("text") or raw.get("content") or raw.get("postText") or ""
+        """Verschiedene Apify-Actor-Schemas normalisieren.
+
+        Unterstützt:
+          - harvestapi~linkedin-post-search  (commentary, actor, numComments, numShares, ...)
+          - curious_coder~linkedin-post-search-scraper  (text, author, likeCount, ...)
+          - jiri.spilka~linkedin-post-scraper  (postText, posterFullName, ...)
+        """
+        # ── Text ──────────────────────────────────────────────────────────────
+        # harvestapi: "commentary" | andere: "text", "content", "postText"
+        text = raw.get("commentary") or raw.get("text") or raw.get("content") or raw.get("postText") or ""
         if len(text.strip()) < 20:
             return None
 
+        # ── ID ────────────────────────────────────────────────────────────────
         uid = (
             raw.get("id")
             or raw.get("postId")
             or raw.get("urn")
+            or raw.get("linkedinUrl")
             or raw.get("url")
             or raw.get("postUrl")
             or str(hash(text[:100]))
         )
 
-        author_obj = raw.get("author") or {}
+        # ── Autor ─────────────────────────────────────────────────────────────
+        # harvestapi: "actor" | andere: "author"
+        author_obj = raw.get("actor") or raw.get("author") or {}
         author = (
             author_obj.get("name")
             or raw.get("authorName")
@@ -229,20 +244,70 @@ class LinkedInAnalyzer:
             or "Unbekannt"
         )
         author_title = (
-            author_obj.get("headline")
+            author_obj.get("position")      # harvestapi
+            or author_obj.get("headline")
             or raw.get("authorHeadline")
             or raw.get("posterTitle")
             or ""
         )
         author_url = (
-            author_obj.get("url")
+            author_obj.get("linkedinUrl")   # harvestapi
+            or author_obj.get("url")
             or raw.get("authorUrl")
             or raw.get("posterProfileUrl")
             or ""
         )
 
+        # ── Datum ─────────────────────────────────────────────────────────────
+        # harvestapi: "postedAt" ist ein Objekt {"date": "...", "timestamp": ...}
+        posted_at_raw = raw.get("postedAt") or raw.get("publishedAt") or raw.get("date") or ""
+        if isinstance(posted_at_raw, dict):
+            posted_at = posted_at_raw.get("date") or str(posted_at_raw.get("timestamp", "")) or ""
+        else:
+            posted_at = posted_at_raw
+
+        # ── Likes / Reaktionen ────────────────────────────────────────────────
+        # harvestapi: "reactionTypeCounts" ist eine Liste von {"type": "...", "count": N}
+        reaction_counts = raw.get("reactionTypeCounts") or []
+        reactions_total = sum(r.get("count", 0) for r in reaction_counts if isinstance(r, dict))
+        likes = int(
+            raw.get("likeCount")
+            or raw.get("likes")
+            or raw.get("reactionsCount")
+            or raw.get("totalReactionCount")
+            or reactions_total
+            or 0
+        )
+
+        # ── Kommentare & Reposts ───────────────────────────────────────────────
+        # harvestapi: "numComments", "numShares"
+        comments = int(
+            raw.get("numComments")          # harvestapi
+            or raw.get("commentCount")
+            or raw.get("commentsCount")
+            or 0
+        )
+        reposts = int(
+            raw.get("numShares")            # harvestapi
+            or raw.get("repostCount")
+            or raw.get("repostsCount")
+            or raw.get("sharesCount")
+            or 0
+        )
+
+        # ── URL ───────────────────────────────────────────────────────────────
+        url = (
+            raw.get("linkedinUrl")
+            or raw.get("url")
+            or raw.get("postUrl")
+            or ""
+        )
+
+        # ── Kommentar-Liste ───────────────────────────────────────────────────
+        # harvestapi: "comments" mit actor.name + commentary
         raw_comments = (
-            raw.get("topComments")
+            raw.get("comments")             # harvestapi
+            or raw.get("topComments")
             or raw.get("commentsList")
             or raw.get("comments_list")
             or []
@@ -250,12 +315,19 @@ class LinkedInAnalyzer:
         comments_list = [
             {
                 "author": (
-                    c.get("author", {}).get("name")
+                    c.get("actor", {}).get("name")  # harvestapi
+                    or c.get("author", {}).get("name")
                     or c.get("authorName")
                     or c.get("commenterName")
                     or "Anonym"
                 ),
-                "text": c.get("text") or c.get("content") or c.get("commentText") or "",
+                "text": (
+                    c.get("commentary")             # harvestapi
+                    or c.get("text")
+                    or c.get("content")
+                    or c.get("commentText")
+                    or ""
+                ),
             }
             for c in (raw_comments if isinstance(raw_comments, list) else [])
             if isinstance(c, dict)
@@ -268,11 +340,11 @@ class LinkedInAnalyzer:
             author_title=author_title,
             author_url=author_url,
             text=text,
-            posted_at=raw.get("postedAt") or raw.get("publishedAt") or raw.get("date") or "",
-            likes=int(raw.get("likeCount") or raw.get("likes") or raw.get("reactionsCount") or 0),
-            comments=int(raw.get("commentCount") or raw.get("commentsCount") or 0),
-            reposts=int(raw.get("repostCount") or raw.get("repostsCount") or raw.get("sharesCount") or 0),
-            url=raw.get("url") or raw.get("postUrl") or raw.get("linkedinUrl") or "",
+            posted_at=posted_at,
+            likes=likes,
+            comments=comments,
+            reposts=reposts,
+            url=url,
             comments_list=comments_list,
         )
 
