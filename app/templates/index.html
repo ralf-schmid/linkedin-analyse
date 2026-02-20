@@ -487,8 +487,8 @@ document.getElementById('analyzeForm').addEventListener('submit', async (e) => {
         } else if (ev.type === 'done') {
           addLog('✓ ' + ev.message, 'done');
           setProgress(100);
-          // Report direkt im Event – als HTML-String anfordern
-          await fetchAndShowReport(fd);
+          // Report ist bereits im Event enthalten – kein zweiter Request nötig
+          showReport(ev.html);
         }
       }
     }
@@ -498,19 +498,12 @@ document.getElementById('analyzeForm').addEventListener('submit', async (e) => {
   btn.disabled = false;
 });
 
-async function fetchAndShowReport(fd) {
-  // Synchronen Endpoint für den Report-HTML aufrufen
-  const resp = await fetch('/analyze', { method: 'POST', body: fd });
-  if (!resp.ok) { addLog('Report-Abruf fehlgeschlagen: ' + resp.status, 'error'); return; }
-  const html = await resp.text();
-
-  // In iframe laden
+function showReport(html) {
   const frame = document.getElementById('reportFrame');
   const blob = new Blob([html], { type: 'text/html' });
   const url  = URL.createObjectURL(blob);
   frame.src  = url;
 
-  // Download-Button
   const dlBtn = document.getElementById('downloadBtn');
   dlBtn.href = url;
   dlBtn.download = `LinkedIn_Analyse_${new Date().toISOString().slice(0,10)}.html`;

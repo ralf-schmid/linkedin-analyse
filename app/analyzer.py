@@ -109,16 +109,21 @@ class AnthropicClient:
 
     def __init__(self, api_key: str):
         self.headers = {**self.HEADERS, "x-api-key": api_key}
+        # Reuse a single client across all calls to avoid per-request TCP handshakes
+        self._client = httpx.AsyncClient(timeout=90)
 
     async def _post(self, payload: dict, timeout: int = 60) -> str:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(
-                f"{self.BASE}/messages",
-                headers=self.headers,
-                json=payload,
-            )
-            resp.raise_for_status()
-            return resp.json()["content"][0]["text"]
+        resp = await self._client.post(
+            f"{self.BASE}/messages",
+            headers=self.headers,
+            json=payload,
+            extensions={"timeout": {"read": timeout, "connect": 10, "write": 10, "pool": 5}},
+        )
+        resp.raise_for_status()
+        return resp.json()["content"][0]["text"]
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
     async def sentiment(self, post: Post) -> dict:
         comments_text = json.dumps(
@@ -350,6 +355,8 @@ class LinkedInAnalyzer:
             summary = await self._claude.summarize(all_posts, config)
         except Exception as exc:
             summary = f"Zusammenfassung konnte nicht erstellt werden: {exc}"
+
+        await self._claude.aclose()
 
         yield {
             "type": "done",
