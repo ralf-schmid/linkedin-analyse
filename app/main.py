@@ -8,13 +8,16 @@ Supports:
 import argparse
 import asyncio
 import json
+import os
+import secrets
 import sys
 from datetime import datetime
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, Form, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -23,6 +26,30 @@ from .report import build_report
 
 # ── App setup ────────────────────────────────────────────────────────────────
 app = FastAPI(title="LinkedIn Post Analyzer", version="1.0.0")
+
+# ── HTTP Basic Auth ───────────────────────────────────────────────────────────
+_WEB_USER = os.environ.get("WEB_USER", "")
+_WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "")
+
+_http_basic = HTTPBasic(auto_error=False)
+
+
+def require_auth(credentials: HTTPBasicCredentials = Depends(_http_basic)):
+    """Dependency: erzwingt HTTP Basic Auth wenn WEB_USER + WEB_PASSWORD gesetzt sind.
+    Ist keine der Variablen gesetzt, wird der Zugriff ohne Authentifizierung erlaubt."""
+    if not _WEB_USER or not _WEB_PASSWORD:
+        return  # Auth deaktiviert
+
+    valid = credentials is not None and (
+        secrets.compare_digest(credentials.username.encode(), _WEB_USER.encode())
+        and secrets.compare_digest(credentials.password.encode(), _WEB_PASSWORD.encode())
+    )
+    if not valid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Ungültige Zugangsdaten",
+            headers={"WWW-Authenticate": 'Basic realm="LinkedIn Analyzer"'},
+        )
 
 BASE_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -34,7 +61,7 @@ app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
+async def index(request: Request, _: None = Depends(require_auth)):
     return templates.TemplateResponse("index.html", {"request": request})
 
 
@@ -49,6 +76,7 @@ async def analyze_stream(
     days: int = Form(7),
     max_posts: int = Form(25),
     include_comments: bool = Form(True),
+    _: None = Depends(require_auth),
 ):
     """
     Server-Sent Events stream – schickt Fortschritts-Events während der Analyse
@@ -93,6 +121,7 @@ async def analyze_sync(
     days: int = Form(7),
     max_posts: int = Form(25),
     include_comments: bool = Form(True),
+    _: None = Depends(require_auth),
 ):
     """Synchroner Fallback – gibt fertigen HTML-Report zurück."""
     config = AnalysisConfig(

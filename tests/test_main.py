@@ -2,6 +2,7 @@
 Tests für app/main.py – FastAPI-Endpunkte
 """
 
+import base64
 import json
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
@@ -12,6 +13,11 @@ from app.analyzer import Post, AnalysisConfig
 
 
 client = TestClient(app)
+
+
+def basic_auth_header(username: str, password: str) -> dict:
+    token = base64.b64encode(f"{username}:{password}".encode()).decode()
+    return {"Authorization": f"Basic {token}"}
 
 
 def make_post(**kwargs) -> Post:
@@ -185,3 +191,61 @@ class TestAnalyzeStreamEndpoint:
         assert len(done_events) == 1
         assert "html" in done_events[0]
         assert "<!DOCTYPE html>" in done_events[0]["html"]
+
+
+# ── HTTP Basic Auth ───────────────────────────────────────────────────────────
+
+class TestHttpBasicAuth:
+    """Auth-Tests laufen mit gepatchten Env-Variablen in app.main."""
+
+    def test_no_auth_configured_allows_access(self):
+        """Ohne WEB_USER/WEB_PASSWORD ist das Frontend offen erreichbar."""
+        with patch("app.main._WEB_USER", ""), patch("app.main._WEB_PASSWORD", ""):
+            resp = client.get("/")
+        assert resp.status_code == 200
+
+    def test_correct_credentials_grant_access(self):
+        with patch("app.main._WEB_USER", "admin"), patch("app.main._WEB_PASSWORD", "geheim"):
+            resp = client.get("/", headers=basic_auth_header("admin", "geheim"))
+        assert resp.status_code == 200
+
+    def test_wrong_password_returns_401(self):
+        with patch("app.main._WEB_USER", "admin"), patch("app.main._WEB_PASSWORD", "geheim"):
+            resp = client.get("/", headers=basic_auth_header("admin", "falsch"))
+        assert resp.status_code == 401
+
+    def test_wrong_username_returns_401(self):
+        with patch("app.main._WEB_USER", "admin"), patch("app.main._WEB_PASSWORD", "geheim"):
+            resp = client.get("/", headers=basic_auth_header("root", "geheim"))
+        assert resp.status_code == 401
+
+    def test_missing_credentials_returns_401(self):
+        with patch("app.main._WEB_USER", "admin"), patch("app.main._WEB_PASSWORD", "geheim"):
+            resp = client.get("/")  # kein Auth-Header
+        assert resp.status_code == 401
+
+    def test_401_response_contains_www_authenticate_header(self):
+        with patch("app.main._WEB_USER", "admin"), patch("app.main._WEB_PASSWORD", "geheim"):
+            resp = client.get("/")
+        assert "WWW-Authenticate" in resp.headers
+        assert 'Basic realm="LinkedIn Analyzer"' in resp.headers["WWW-Authenticate"]
+
+    def test_health_endpoint_always_open(self):
+        """Der /health-Endpunkt muss ohne Auth erreichbar sein (Docker Healthcheck)."""
+        with patch("app.main._WEB_USER", "admin"), patch("app.main._WEB_PASSWORD", "geheim"):
+            resp = client.get("/health")
+        assert resp.status_code == 200
+
+    def test_analyze_endpoint_protected(self):
+        with patch("app.main._WEB_USER", "admin"), patch("app.main._WEB_PASSWORD", "geheim"):
+            resp = client.post("/analyze", data={
+                "keywords": "AI", "days": "7", "max_posts": "10", "include_comments": "true",
+            })
+        assert resp.status_code == 401
+
+    def test_analyze_stream_endpoint_protected(self):
+        with patch("app.main._WEB_USER", "admin"), patch("app.main._WEB_PASSWORD", "geheim"):
+            resp = client.post("/analyze/stream", data={
+                "keywords": "AI", "days": "7", "max_posts": "10", "include_comments": "true",
+            })
+        assert resp.status_code == 401
