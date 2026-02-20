@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import AsyncIterator, Optional
 
 import httpx
+from urllib.parse import quote_plus
 
 
 # ── Konfiguration ─────────────────────────────────────────────────────────────
@@ -70,10 +71,17 @@ class Post:
 APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
-# Apify Actor – Standard: harvestapi~linkedin-post-search
+# Apify Actor – Standard: supreme_coder~linkedin-post
 APIFY_ACTOR = os.environ.get(
-    "APIFY_ACTOR", "harvestapi~linkedin-post-search"
+    "APIFY_ACTOR", "supreme_coder~linkedin-post"
 )
+
+# Mapping: Tage → LinkedIn datePosted URL-Parameter
+_LI_DATE_FILTER: dict[int, str] = {
+    1: "past-24h",
+    7: "past-week",
+    30: "past-month",
+}
 CLAUDE_HAIKU = "claude-haiku-4-5-20251001"
 CLAUDE_SONNET = "claude-sonnet-4-6"
 
@@ -90,16 +98,28 @@ class ApifyClient:
         """Scrapt LinkedIn-Posts für ein einzelnes Keyword.
 
         Gibt (posts, payload) zurück – payload für Diagnose-Logging.
+
+        supreme_coder~linkedin-post erwartet LinkedIn-Such-URLs als Input:
+          urls            – Array von LinkedIn-Such-URLs
+          limitPerSource  – Max. Posts pro URL
+          deepScrape      – Mehr Details inkl. Reaktionen/Kommentare
         """
         url = f"{self.BASE}/acts/{APIFY_ACTOR}/run-sync-get-dataset-items"
-        # harvestapi~linkedin-post-search schema:
-        #   searchQueries (array of strings), maxPosts, scrapeComments, scrapeReactions, maxReactions
+
+        # LinkedIn-Such-URL mit Keyword und Datumsfilter aufbauen
+        li_date = _LI_DATE_FILTER.get(config.days) or (
+            "past-week" if config.days <= 7 else "past-month"
+        )
+        search_url = (
+            "https://www.linkedin.com/search/results/content/"
+            f"?keywords={quote_plus(keyword)}"
+            f"&datePosted={li_date}"
+            "&origin=FACETED_SEARCH&sortBy=date_posted"
+        )
         payload = {
-            "searchQueries": [keyword],
-            "maxPosts": config.max_posts_per_keyword,
-            "scrapeComments": config.include_comments,
-            "scrapeReactions": False,
-            "maxReactions": 5,
+            "urls": [search_url],
+            "limitPerSource": config.max_posts_per_keyword,
+            "deepScrape": config.include_comments,
         }
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(
@@ -223,17 +243,36 @@ class LinkedInAnalyzer:
         kw_slug = "_".join(k[:15].replace(" ", "-") for k in self.config.keywords[:2])
         return Path(self.config.cache_dir) / f"{prefix}_{ts}_{kw_slug}.json"
 
+    @staticmethod
+    def _first(*values, cast=str, default="") -> any:
+        """Gibt den ersten nicht-None-Wert zurück, gecastet auf `cast`."""
+        for v in values:
+            if v is not None:
+                try:
+                    return cast(v)
+                except (TypeError, ValueError):
+                    continue
+        return default
+
     def _normalize_post(self, raw: dict, keyword: str) -> Optional[Post]:
         """Verschiedene Apify-Actor-Schemas normalisieren.
 
         Unterstützt:
+          - supreme_coder~linkedin-post    (text, author.name/headline, likesCount, commentsCount, sharesCount, ...)
           - harvestapi~linkedin-post-search  (commentary, actor, numComments, numShares, ...)
           - curious_coder~linkedin-post-search-scraper  (text, author, likeCount, ...)
           - jiri.spilka~linkedin-post-scraper  (postText, posterFullName, ...)
         """
         # ── Text ──────────────────────────────────────────────────────────────
-        # harvestapi: "commentary" | andere: "text", "content", "postText"
-        text = raw.get("commentary") or raw.get("text") or raw.get("content") or raw.get("postText") or ""
+        text = (
+            raw.get("commentary")       # harvestapi
+            or raw.get("text")          # supreme_coder, curious_coder
+            or raw.get("content")
+            or raw.get("postText")
+            or raw.get("postContent")
+            or raw.get("description")
+            or ""
+        )
         if len(text.strip()) < 20:
             return None
 
@@ -245,99 +284,140 @@ class LinkedInAnalyzer:
             or raw.get("linkedinUrl")
             or raw.get("url")
             or raw.get("postUrl")
+            or raw.get("link")
             or str(hash(text[:100]))
         )
 
         # ── Autor ─────────────────────────────────────────────────────────────
-        # harvestapi: "actor" | andere: "author"
-        author_obj = raw.get("actor") or raw.get("author") or {}
+        # supreme_coder: "author" dict | harvestapi: "actor" dict
+        author_obj = raw.get("author") or raw.get("actor") or {}
+        if not isinstance(author_obj, dict):
+            author_obj = {}
+
+        # Vollname aus verschiedenen Varianten zusammensetzen
+        first = author_obj.get("firstName", "") or ""
+        last  = author_obj.get("lastName", "") or ""
+        full_from_parts = f"{first} {last}".strip()
+
         author = (
             author_obj.get("name")
+            or author_obj.get("fullName")
+            or full_from_parts
             or raw.get("authorName")
             or raw.get("posterFullName")
             or "Unbekannt"
         )
         author_title = (
-            author_obj.get("position")      # harvestapi
-            or author_obj.get("headline")
+            author_obj.get("headline")      # supreme_coder
+            or author_obj.get("position")   # harvestapi
+            or author_obj.get("title")
+            or author_obj.get("jobTitle")
             or raw.get("authorHeadline")
             or raw.get("posterTitle")
             or ""
         )
         author_url = (
-            author_obj.get("linkedinUrl")   # harvestapi
-            or author_obj.get("url")
+            author_obj.get("url")           # supreme_coder
+            or author_obj.get("profileUrl")
+            or author_obj.get("linkedinUrl")
+            or author_obj.get("linkedInUrl")
             or raw.get("authorUrl")
             or raw.get("posterProfileUrl")
             or ""
         )
 
         # ── Datum ─────────────────────────────────────────────────────────────
-        # harvestapi: "postedAt" ist ein Objekt {"date": "...", "timestamp": ...}
-        posted_at_raw = raw.get("postedAt") or raw.get("publishedAt") or raw.get("date") or ""
+        posted_at_raw = (
+            raw.get("postedAt")         # harvestapi (dict or str)
+            or raw.get("date")          # supreme_coder
+            or raw.get("publishedAt")
+            or raw.get("createdAt")
+            or raw.get("postedDate")
+            or ""
+        )
         if isinstance(posted_at_raw, dict):
-            posted_at = posted_at_raw.get("date") or str(posted_at_raw.get("timestamp", "")) or ""
+            posted_at = (
+                posted_at_raw.get("date")
+                or str(posted_at_raw.get("timestamp", ""))
+                or ""
+            )
         else:
-            posted_at = posted_at_raw
+            posted_at = str(posted_at_raw) if posted_at_raw else ""
 
         # ── Likes / Reaktionen ────────────────────────────────────────────────
-        # harvestapi: "reactionTypeCounts" ist eine Liste von {"type": "...", "count": N}
+        # Vorsicht: int(None) wirft TypeError, int(0) ist 0 – daher _first() nutzen
         reaction_counts = raw.get("reactionTypeCounts") or []
         reactions_total = sum(r.get("count", 0) for r in reaction_counts if isinstance(r, dict))
-        likes = int(
-            raw.get("likeCount")
-            or raw.get("likes")
-            or raw.get("reactionsCount")
-            or raw.get("totalReactionCount")
-            or reactions_total
-            or 0
+
+        likes = self._first(
+            raw.get("likesCount"),          # supreme_coder
+            raw.get("totalLikes"),
+            raw.get("likeCount"),
+            raw.get("likes"),
+            raw.get("reactionsCount"),
+            raw.get("totalReactionCount"),
+            raw.get("numLikes"),
+            reactions_total if reactions_total else None,
+            cast=int, default=0,
         )
 
-        # ── Kommentare & Reposts ───────────────────────────────────────────────
-        # harvestapi: "numComments", "numShares"
-        comments = int(
-            raw.get("numComments")          # harvestapi
-            or raw.get("commentCount")
-            or raw.get("commentsCount")
-            or 0
+        # ── Kommentare ────────────────────────────────────────────────────────
+        comments = self._first(
+            raw.get("commentsCount"),       # supreme_coder
+            raw.get("totalComments"),
+            raw.get("numComments"),         # harvestapi
+            raw.get("commentCount"),
+            raw.get("numComments"),
+            cast=int, default=0,
         )
-        reposts = int(
-            raw.get("numShares")            # harvestapi
-            or raw.get("repostCount")
-            or raw.get("repostsCount")
-            or raw.get("sharesCount")
-            or 0
+
+        # ── Reposts / Shares ──────────────────────────────────────────────────
+        reposts = self._first(
+            raw.get("sharesCount"),         # supreme_coder
+            raw.get("repostsCount"),
+            raw.get("numShares"),           # harvestapi
+            raw.get("repostCount"),
+            raw.get("resharedCount"),
+            raw.get("numReposts"),
+            cast=int, default=0,
         )
 
         # ── URL ───────────────────────────────────────────────────────────────
         url = (
-            raw.get("linkedinUrl")
-            or raw.get("url")
+            raw.get("url")              # supreme_coder
+            or raw.get("linkedinUrl")
             or raw.get("postUrl")
+            or raw.get("link")
             or ""
         )
 
         # ── Kommentar-Liste ───────────────────────────────────────────────────
-        # harvestapi: "comments" mit actor.name + commentary
         raw_comments = (
-            raw.get("comments")             # harvestapi
+            raw.get("comments")             # supreme_coder + harvestapi
             or raw.get("topComments")
             or raw.get("commentsList")
             or raw.get("comments_list")
             or []
         )
+
+        def _comment_author(c: dict) -> str:
+            a = c.get("author") or c.get("actor") or {}
+            if isinstance(a, dict):
+                return a.get("name") or a.get("fullName") or ""
+            if isinstance(a, str):
+                return a
+            return (
+                c.get("authorName")
+                or c.get("commenterName")
+                or "Anonym"
+            )
+
         comments_list = [
             {
-                "author": (
-                    c.get("actor", {}).get("name")  # harvestapi
-                    or c.get("author", {}).get("name")
-                    or c.get("authorName")
-                    or c.get("commenterName")
-                    or "Anonym"
-                ),
+                "author": _comment_author(c) or "Anonym",
                 "text": (
-                    c.get("commentary")             # harvestapi
-                    or c.get("text")
+                    c.get("text")           # supreme_coder
+                    or c.get("commentary")  # harvestapi
                     or c.get("content")
                     or c.get("commentText")
                     or ""
@@ -452,6 +532,15 @@ class LinkedInAnalyzer:
                     "message": f"  → \"{keyword}\": {len(raw_posts)} Posts abgerufen, {new_count} neu (gesamt unique: {len(all_posts)})",
                     "percent": int(10 + ((i + 1) / len(config.keywords)) * 30),
                 }
+                # Diagnose: Engagement-Felder prüfen
+                if raw_posts and new_count > 0:
+                    sample = raw_posts[0]
+                    sample_keys = sorted(k for k in sample.keys() if not k.startswith("_"))
+                    yield {
+                        "type": "progress", "phase": "scraping",
+                        "message": f"  Felder (erster Post): {sample_keys}",
+                        "percent": int(10 + ((i + 1) / len(config.keywords)) * 30),
+                    }
 
             # Scrape-Ergebnis als Cache speichern
             if config.cache_dir and all_posts:
