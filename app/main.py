@@ -120,9 +120,13 @@ async def report_endpoint(
     request: Request,
     _: None = Depends(require_auth),
 ):
-    """Generiert HTML-Report aus manuell gefilterten Posts (nach Post-Überprüfung)."""
+    """Generiert HTML-Report aus manuell gefilterten Posts.
+
+    Erstellt die Executive Summary neu auf Basis der gefilterten Posts,
+    damit ausgeschlossene Posts komplett ignoriert werden.
+    """
     body = await request.json()
-    from .analyzer import Post
+    from .analyzer import Post, AnthropicClient, ANTHROPIC_KEY
     posts = [
         Post(**{k: v for k, v in d.items() if k in Post.__dataclass_fields__})
         for d in body.get("posts", [])
@@ -131,7 +135,19 @@ async def report_endpoint(
         keywords=[k.strip() for k in body.get("keywords", "").split(",") if k.strip()],
         days=int(body.get("days", 7)),
     )
-    return HTMLResponse(content=build_report(posts, body.get("summary", ""), config))
+
+    # Summary immer neu auf gefilterter Grundgesamtheit berechnen
+    summary = body.get("summary", "")
+    if ANTHROPIC_KEY and posts:
+        client = AnthropicClient(ANTHROPIC_KEY)
+        try:
+            summary = await client.summarize(posts, config)
+        except Exception:
+            pass  # Original-Summary als Fallback
+        finally:
+            await client.aclose()
+
+    return HTMLResponse(content=build_report(posts, summary, config))
 
 
 @app.post("/analyze", response_class=HTMLResponse)
@@ -263,17 +279,29 @@ async def cli_main(args):
         if event["type"] in ("progress", "warning"):
             _print_event(event)
         elif event["type"] == "done":
-            from .analyzer import Post
+            from .analyzer import Post, AnthropicClient, ANTHROPIC_KEY
             posts = [
                 Post(**{k: v for k, v in d.items() if k in Post.__dataclass_fields__})
                 for d in event["posts"]
             ]
             summary = event["summary"]
+            original_count = len(posts)
 
             # Interaktive Post-Überprüfung (nur wenn stdin ein Terminal ist)
             if not args.no_review and sys.stdin.isatty():
                 _print_post_list(posts)
                 posts = _prompt_exclusion(posts)
+
+            # Summary auf gefilterter Menge neu generieren
+            if len(posts) < original_count:
+                print(f"\n   🤖 Erstelle neue Zusammenfassung für {len(posts)} gefilterte Posts ...")
+                _claude = AnthropicClient(ANTHROPIC_KEY)
+                try:
+                    summary = await _claude.summarize(posts, config)
+                except Exception as exc:
+                    print(f"   ⚠️  Zusammenfassung fehlgeschlagen, nutze Original: {exc}")
+                finally:
+                    await _claude.aclose()
 
             _save_report(posts, summary, config, args.output)
         elif event["type"] == "error":
@@ -315,17 +343,29 @@ async def debug_main(args):
         if event["type"] in ("progress", "warning"):
             _print_event(event)
         elif event["type"] == "done":
-            from .analyzer import Post
+            from .analyzer import Post, AnthropicClient, ANTHROPIC_KEY
             posts = [
                 Post(**{k: v for k, v in d.items() if k in Post.__dataclass_fields__})
                 for d in event["posts"]
             ]
             summary = event["summary"]
+            original_count = len(posts)
 
             # Interaktive Post-Überprüfung (nur wenn stdin ein Terminal ist)
             if not args.no_review and sys.stdin.isatty():
                 _print_post_list(posts)
                 posts = _prompt_exclusion(posts)
+
+            # Summary auf gefilterter Menge neu generieren
+            if len(posts) < original_count:
+                print(f"\n   🤖 Erstelle neue Zusammenfassung für {len(posts)} gefilterte Posts ...")
+                _claude = AnthropicClient(ANTHROPIC_KEY)
+                try:
+                    summary = await _claude.summarize(posts, config)
+                except Exception as exc:
+                    print(f"   ⚠️  Zusammenfassung fehlgeschlagen, nutze Original: {exc}")
+                finally:
+                    await _claude.aclose()
 
             _save_report(posts, summary, config, args.output)
         elif event["type"] == "error":
