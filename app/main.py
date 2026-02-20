@@ -115,6 +115,25 @@ async def analyze_stream(
     )
 
 
+@app.post("/report", response_class=HTMLResponse)
+async def report_endpoint(
+    request: Request,
+    _: None = Depends(require_auth),
+):
+    """Generiert HTML-Report aus manuell gefilterten Posts (nach Post-Überprüfung)."""
+    body = await request.json()
+    from .analyzer import Post
+    posts = [
+        Post(**{k: v for k, v in d.items() if k in Post.__dataclass_fields__})
+        for d in body.get("posts", [])
+    ]
+    config = AnalysisConfig(
+        keywords=[k.strip() for k in body.get("keywords", "").split(",") if k.strip()],
+        days=int(body.get("days", 7)),
+    )
+    return HTMLResponse(content=build_report(posts, body.get("summary", ""), config))
+
+
 @app.post("/analyze", response_class=HTMLResponse)
 async def analyze_sync(
     keywords: str = Form(...),

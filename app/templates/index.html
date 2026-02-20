@@ -284,6 +284,75 @@ select option { background: var(--surface2); }
   width: 100%;
 }
 
+/* Review step */
+.review-wrap { display: none; flex-direction: column; gap: 0; }
+.review-wrap.visible { display: flex; }
+
+.review-header {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  flex-wrap: wrap; gap: 12px; margin-bottom: 16px;
+}
+.review-title { font-family: 'Syne', sans-serif; font-size: 18px; font-weight: 800; }
+.review-subtitle { font-size: 13px; color: var(--muted); margin-top: 4px; }
+
+.review-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.btn-sm {
+  padding: 7px 13px; border-radius: var(--r); font-size: 12px; font-weight: 600;
+  cursor: pointer; border: 1px solid var(--border);
+  background: transparent; color: var(--muted);
+  transition: border-color .2s, color .2s;
+}
+.btn-sm:hover { border-color: var(--text); color: var(--text); }
+.review-counter {
+  font-family: 'DM Mono', monospace; font-size: 12px; color: var(--accent);
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 7px 12px;
+}
+.btn-generate {
+  padding: 9px 20px; background: var(--li); border: none; border-radius: var(--r);
+  color: #fff; font-family: 'Syne', sans-serif; font-size: 14px; font-weight: 700;
+  cursor: pointer; transition: background .2s;
+  box-shadow: 0 0 18px var(--li-glow);
+}
+.btn-generate:hover:not(:disabled) { background: #0959ae; }
+.btn-generate:disabled { opacity: .5; cursor: not-allowed; }
+
+.review-list {
+  display: flex; flex-direction: column; gap: 8px;
+  overflow-y: auto; max-height: calc(100vh - 260px);
+  padding-right: 2px;
+}
+
+.review-card {
+  display: flex; gap: 14px; align-items: flex-start;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 13px 15px; cursor: pointer;
+  transition: border-color .15s, opacity .2s, background .15s;
+  user-select: none;
+}
+.review-card:hover { border-color: var(--li); }
+.review-card.excluded { opacity: .3; background: var(--bg); }
+
+.review-check { font-size: 20px; flex-shrink: 0; width: 24px; text-align: center; color: var(--li); }
+.review-card.excluded .review-check { color: var(--muted); }
+
+.review-content { flex: 1; min-width: 0; }
+.review-top {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 10px; margin-bottom: 4px;
+}
+.review-author { font-weight: 600; font-size: 14px; }
+.review-position { font-size: 11px; color: var(--muted); }
+.review-meta { font-family: 'DM Mono', monospace; font-size: 11px; color: var(--muted); margin: 5px 0; }
+.review-kw {
+  display: inline-block; background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 10px; font-size: 10px; color: var(--muted); padding: 1px 8px; margin-right: 6px;
+}
+.review-preview {
+  font-size: 12px; color: var(--text); line-height: 1.55;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+
 /* Responsive */
 @media (max-width: 860px) {
   .shell { grid-template-columns: 1fr; }
@@ -385,6 +454,23 @@ select option { background: var(--surface2); }
       <div class="log-wrap" id="logWrap"></div>
     </div>
 
+    <!-- Review -->
+    <div class="review-wrap" id="reviewView">
+      <div class="review-header">
+        <div>
+          <div class="review-title">📋 Post-Überprüfung</div>
+          <div class="review-subtitle">Klicke auf nicht relevante Posts um sie aus dem Report auszuschließen</div>
+        </div>
+        <div class="review-actions">
+          <button class="btn-sm" id="selectAllBtn">Alle auswählen</button>
+          <button class="btn-sm" id="deselectAllBtn">Alle abwählen</button>
+          <div class="review-counter" id="reviewCounter">0 / 0</div>
+          <button class="btn-generate" id="generateBtn">▶ Report erstellen</button>
+        </div>
+      </div>
+      <div class="review-list" id="reviewList"></div>
+    </div>
+
     <!-- Result -->
     <div class="result-wrap" id="resultView">
       <div class="result-header">
@@ -413,6 +499,7 @@ toggleEl.addEventListener('click', () => {
 const views = {
   welcome:  document.getElementById('welcomeView'),
   progress: document.getElementById('progressView'),
+  review:   document.getElementById('reviewView'),
   result:   document.getElementById('resultView'),
 };
 function showView(name) {
@@ -487,8 +574,8 @@ document.getElementById('analyzeForm').addEventListener('submit', async (e) => {
         } else if (ev.type === 'done') {
           addLog('✓ ' + ev.message, 'done');
           setProgress(100);
-          // Report ist bereits im Event enthalten – kein zweiter Request nötig
-          showReport(ev.html);
+          // Manuelle Überprüfung vor Report-Erstellung
+          startReview(ev.posts, ev.summary);
         }
       }
     }
@@ -498,6 +585,114 @@ document.getElementById('analyzeForm').addEventListener('submit', async (e) => {
   btn.disabled = false;
 });
 
+// ── Review step ───────────────────────────────────────────────────────────────
+let _reviewPosts = [];
+let _reviewSummary = '';
+
+const SENT_EMOJI = { positiv: '😊', negativ: '😟', neutral: '😐', gemischt: '🤔' };
+
+function startReview(posts, summary) {
+  _reviewPosts = posts;
+  _reviewSummary = summary;
+
+  const list = document.getElementById('reviewList');
+  list.innerHTML = '';
+
+  posts.forEach((p, i) => {
+    const card = document.createElement('div');
+    card.className = 'review-card';
+    card.dataset.idx = i;
+
+    const preview = (p.text || '').slice(0, 220).replace(/\n/g, ' ');
+    const more = (p.text || '').length > 220 ? '…' : '';
+    const emoji = SENT_EMOJI[p.sentiment_post] || '?';
+    const sentLabel = `${emoji} ${p.sentiment_post || 'neutral'} (${(+(p.sentiment_score || 0)).toFixed(2)})`;
+
+    card.innerHTML =
+      '<div class="review-check">☑</div>' +
+      '<div class="review-content">' +
+        '<div class="review-top">' +
+          '<div>' +
+            '<div class="review-author">' + escHtml(p.author || 'Unbekannt') + '</div>' +
+            '<div class="review-position">' + escHtml(p.author_title || '') + '</div>' +
+          '</div>' +
+          '<div style="font-size:11px;color:var(--muted);text-align:right;white-space:nowrap">' + escHtml(sentLabel) + '</div>' +
+        '</div>' +
+        '<div class="review-meta">' +
+          '<span class="review-kw">' + escHtml(p.keyword || '') + '</span>' +
+          '👍 ' + (p.likes || 0) + ' · 💬 ' + (p.comments || 0) + ' · 🔁 ' + (p.reposts || 0) +
+        '</div>' +
+        '<div class="review-preview">' + escHtml(preview) + more + '</div>' +
+      '</div>';
+
+    card.addEventListener('click', () => {
+      card.classList.toggle('excluded');
+      card.querySelector('.review-check').textContent =
+        card.classList.contains('excluded') ? '☐' : '☑';
+      updateReviewCounter();
+    });
+
+    list.appendChild(card);
+  });
+
+  updateReviewCounter();
+  showView('review');
+}
+
+function updateReviewCounter() {
+  const total    = document.querySelectorAll('.review-card').length;
+  const selected = document.querySelectorAll('.review-card:not(.excluded)').length;
+  document.getElementById('reviewCounter').textContent = selected + ' / ' + total + ' ausgewählt';
+  document.getElementById('generateBtn').disabled = selected === 0;
+}
+
+document.getElementById('selectAllBtn').addEventListener('click', () => {
+  document.querySelectorAll('.review-card').forEach(c => {
+    c.classList.remove('excluded');
+    c.querySelector('.review-check').textContent = '☑';
+  });
+  updateReviewCounter();
+});
+
+document.getElementById('deselectAllBtn').addEventListener('click', () => {
+  document.querySelectorAll('.review-card').forEach(c => {
+    c.classList.add('excluded');
+    c.querySelector('.review-check').textContent = '☐';
+  });
+  updateReviewCounter();
+});
+
+document.getElementById('generateBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('generateBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Erstelle Report …';
+
+  const selectedIdxs = new Set(
+    [...document.querySelectorAll('.review-card:not(.excluded)')].map(c => +c.dataset.idx)
+  );
+  const filteredPosts = _reviewPosts.filter((_, i) => selectedIdxs.has(i));
+
+  try {
+    const resp = await fetch('/report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        posts: filteredPosts,
+        summary: _reviewSummary,
+        keywords: document.getElementById('keywords').value,
+        days: +document.getElementById('days').value,
+      }),
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    showReport(await resp.text());
+  } catch (err) {
+    alert('Fehler beim Erstellen des Reports: ' + err.message);
+    btn.disabled = false;
+    btn.textContent = '▶ Report erstellen';
+  }
+});
+
+// ── Report anzeigen ───────────────────────────────────────────────────────────
 function showReport(html) {
   const frame = document.getElementById('reportFrame');
   const blob = new Blob([html], { type: 'text/html' });
@@ -514,6 +709,8 @@ function showReport(html) {
 // Neue Analyse
 document.getElementById('newBtn').addEventListener('click', () => {
   document.getElementById('runBtn').disabled = false;
+  _reviewPosts = [];
+  _reviewSummary = '';
   showView('welcome');
 });
 </script>
