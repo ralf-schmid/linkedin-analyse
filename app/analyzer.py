@@ -7,6 +7,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import AsyncIterator, Optional
 
 import httpx
@@ -19,6 +20,10 @@ class AnalysisConfig:
     days: int = 7
     max_posts_per_keyword: int = 25
     include_comments: bool = True
+    # Cache-Optionen
+    cache_dir: Optional[str] = None       # Verzeichnis für Zwischenspeicherung
+    from_scrape: Optional[str] = None     # Scrape-Cache laden (überspringt Apify)
+    from_analysis: Optional[str] = None  # Analysis-Cache laden (überspringt Apify + Claude)
 
     @property
     def apify_date_filter(self) -> str:
@@ -81,10 +86,14 @@ class ApifyClient:
 
     async def scrape_linkedin(
         self, keyword: str, config: AnalysisConfig, timeout: int = 180
-    ) -> list[dict]:
+    ) -> tuple[list[dict], dict]:
+        """Scrapt LinkedIn-Posts für ein einzelnes Keyword.
+
+        Gibt (posts, payload) zurück – payload für Diagnose-Logging.
+        """
         url = f"{self.BASE}/acts/{APIFY_ACTOR}/run-sync-get-dataset-items"
         # harvestapi~linkedin-post-search schema:
-        #   searchQueries (array), maxPosts, scrapeComments, scrapeReactions, maxReactions
+        #   searchQueries (array of strings), maxPosts, scrapeComments, scrapeReactions, maxReactions
         payload = {
             "searchQueries": [keyword],
             "maxPosts": config.max_posts_per_keyword,
@@ -100,7 +109,7 @@ class ApifyClient:
             )
             resp.raise_for_status()
             data = resp.json()
-            return data if isinstance(data, list) else [data]
+            return (data if isinstance(data, list) else [data]), payload
 
 
 class AnthropicClient:
@@ -208,6 +217,11 @@ class LinkedInAnalyzer:
         self.config = config
         self._apify = ApifyClient(APIFY_TOKEN)
         self._claude = AnthropicClient(ANTHROPIC_KEY)
+
+    def _make_cache_path(self, prefix: str) -> Path:
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        kw_slug = "_".join(k[:15].replace(" ", "-") for k in self.config.keywords[:2])
+        return Path(self.config.cache_dir) / f"{prefix}_{ts}_{kw_slug}.json"
 
     def _normalize_post(self, raw: dict, keyword: str) -> Optional[Post]:
         """Verschiedene Apify-Actor-Schemas normalisieren.
@@ -351,58 +365,125 @@ class LinkedInAnalyzer:
     async def run_stream(self) -> AsyncIterator[dict]:
         """Async-Generator: liefert Fortschritts-Events als Dicts."""
         config = self.config
-        all_posts: list[Post] = []
-        seen_ids: set[str] = set()
 
-        # ── Phase 1: Scraping ──────────────────────────────────────────────
-        for i, keyword in enumerate(config.keywords):
+        # ── Shortcut: vollständigen Analysis-Cache laden ───────────────────────
+        if config.from_analysis:
             yield {
-                "type": "progress",
-                "phase": "scraping",
-                "message": f"Scrape LinkedIn fuer Keyword '{keyword}' ({i+1}/{len(config.keywords)}) ...",
-                "percent": int(10 + (i / len(config.keywords)) * 30),
+                "type": "progress", "phase": "cache", "percent": 5,
+                "message": f"Lade Analysis-Cache: {config.from_analysis} ...",
             }
             try:
-                raw_posts = await self._apify.scrape_linkedin(keyword, config)
-            except httpx.HTTPStatusError as exc:
-                yield {
-                    "type": "warning",
-                    "message": f"Apify-Fehler fuer Keyword '{keyword}': {exc.response.status_code} - {exc.response.text[:200]}",
-                }
-                continue
+                with open(config.from_analysis, "r", encoding="utf-8") as f:
+                    cached = json.load(f)
+                all_posts = [
+                    Post(**{k: v for k, v in d.items() if k in Post.__dataclass_fields__})
+                    for d in cached["posts"]
+                ]
+                summary = cached["summary"]
             except Exception as exc:
-                yield {"type": "warning", "message": f"Scraping-Fehler fuer Keyword '{keyword}': {exc}"}
-                continue
-
-            for raw in raw_posts:
-                post = self._normalize_post(raw, keyword)
-                if post and post.id not in seen_ids:
-                    seen_ids.add(post.id)
-                    all_posts.append(post)
-
-        yield {
-            "type": "progress",
-            "phase": "dedup",
-            "message": f"{len(all_posts)} Posts gesammelt (dedupliziert). Sortiere nach Engagement ...",
-            "percent": 45,
-        }
-
-        # Nach Engagement sortieren
-        all_posts.sort(key=lambda p: p.engagement_score, reverse=True)
-
-        if not all_posts:
+                yield {"type": "error", "message": f"Fehler beim Laden des Analysis-Cache: {exc}"}
+                return
             yield {
-                "type": "error",
-                "message": "Keine Posts gefunden. Bitte Keywords oder Zeitraum anpassen.",
+                "type": "progress", "phase": "cache", "percent": 95,
+                "message": f"{len(all_posts)} Posts + Executive Summary geladen. Erstelle Report ...",
+            }
+            yield {
+                "type": "done", "message": "Report aus Cache erstellt.", "percent": 100,
+                "posts": [p.to_dict() for p in all_posts], "summary": summary,
             }
             return
 
-        # ── Phase 2: Sentiment je Post ─────────────────────────────────────
-        for i, post in enumerate(all_posts):
+        all_posts: list[Post] = []
+        seen_ids: set[str] = set()
+
+        # ── Phase 1a: Scrape-Cache laden (überspringt Apify) ──────────────────
+        if config.from_scrape:
             yield {
-                "type": "progress",
-                "phase": "sentiment",
-                "message": f"Sentiment-Analyse Post {i+1}/{len(all_posts)}: {post.author} ...",
+                "type": "progress", "phase": "cache", "percent": 5,
+                "message": f"Lade Scrape-Cache: {config.from_scrape} ...",
+            }
+            try:
+                with open(config.from_scrape, "r", encoding="utf-8") as f:
+                    cached = json.load(f)
+                for d in cached["posts"]:
+                    p = Post(**{k: v for k, v in d.items() if k in Post.__dataclass_fields__})
+                    if p.id not in seen_ids:
+                        seen_ids.add(p.id)
+                        all_posts.append(p)
+            except Exception as exc:
+                yield {"type": "error", "message": f"Fehler beim Laden des Scrape-Cache: {exc}"}
+                return
+            yield {
+                "type": "progress", "phase": "cache", "percent": 40,
+                "message": f"{len(all_posts)} Posts aus Cache geladen (Apify übersprungen).",
+            }
+
+        # ── Phase 1b: Scraping via Apify ──────────────────────────────────────
+        else:
+            for i, keyword in enumerate(config.keywords):
+                yield {
+                    "type": "progress", "phase": "scraping",
+                    "message": f"Scrape LinkedIn [{i+1}/{len(config.keywords)}]: \"{keyword}\" ...",
+                    "percent": int(10 + (i / len(config.keywords)) * 30),
+                }
+                try:
+                    raw_posts, sent_payload = await self._apify.scrape_linkedin(keyword, config)
+                    yield {
+                        "type": "progress", "phase": "scraping",
+                        "message": f"  Apify-Payload: {json.dumps(sent_payload, ensure_ascii=False)}",
+                        "percent": int(10 + (i / len(config.keywords)) * 30),
+                    }
+                except httpx.HTTPStatusError as exc:
+                    yield {"type": "warning", "message": f"Apify-Fehler für \"{keyword}\": {exc.response.status_code} – {exc.response.text[:200]}"}
+                    continue
+                except Exception as exc:
+                    yield {"type": "warning", "message": f"Scraping-Fehler für \"{keyword}\": {exc}"}
+                    continue
+
+                new_count = 0
+                for raw in raw_posts:
+                    post = self._normalize_post(raw, keyword)
+                    if post and post.id not in seen_ids:
+                        seen_ids.add(post.id)
+                        all_posts.append(post)
+                        new_count += 1
+                yield {
+                    "type": "progress", "phase": "scraping",
+                    "message": f"  → \"{keyword}\": {len(raw_posts)} Posts abgerufen, {new_count} neu (gesamt unique: {len(all_posts)})",
+                    "percent": int(10 + ((i + 1) / len(config.keywords)) * 30),
+                }
+
+            # Scrape-Ergebnis als Cache speichern
+            if config.cache_dir and all_posts:
+                cache_path = self._make_cache_path("scrape")
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(cache_path, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "meta": {"keywords": config.keywords, "days": config.days,
+                                 "created_at": datetime.now(timezone.utc).isoformat()},
+                        "posts": [p.to_dict() for p in all_posts],
+                    }, f, ensure_ascii=False, indent=2)
+                yield {
+                    "type": "progress", "phase": "cache", "percent": 42,
+                    "message": f"Scrape-Cache gespeichert → {cache_path}",
+                }
+
+        yield {
+            "type": "progress", "phase": "dedup", "percent": 45,
+            "message": f"{len(all_posts)} Posts gesammelt (unique). Sortiere nach Engagement ...",
+        }
+        all_posts.sort(key=lambda p: p.engagement_score, reverse=True)
+
+        if not all_posts:
+            yield {"type": "error", "message": "Keine Posts gefunden. Bitte Keywords oder Zeitraum anpassen."}
+            return
+
+        # ── Phase 2: Sentiment je Post ────────────────────────────────────────
+        for i, post in enumerate(all_posts):
+            text_preview = post.text[:65].replace("\n", " ")
+            yield {
+                "type": "progress", "phase": "sentiment",
+                "message": f"Sentiment [{i+1}/{len(all_posts)}] {post.author}: \"{text_preview}…\"",
                 "percent": int(45 + (i / len(all_posts)) * 40),
             }
             try:
@@ -413,20 +494,40 @@ class LinkedInAnalyzer:
                 post.main_topics = result.get("main_topics", [])
                 post.summary = result.get("summary", "")
                 post.notable_comment = result.get("notable_comment", "")
+                topics_str = ", ".join(post.main_topics[:3]) or "–"
+                yield {
+                    "type": "progress", "phase": "sentiment_result",
+                    "message": f"  → {post.sentiment_post} (Score: {post.sentiment_score:+.2f}) | Themen: {topics_str}",
+                    "percent": int(45 + ((i + 1) / len(all_posts)) * 40),
+                }
             except Exception as exc:
                 yield {"type": "warning", "message": f"Sentiment-Fehler Post {i+1}: {exc}"}
 
-        # ── Phase 3: Gesamt-Zusammenfassung ───────────────────────────────
+        # ── Phase 3: Executive Summary ────────────────────────────────────────
         yield {
-            "type": "progress",
-            "phase": "summary",
-            "message": "Erstelle Executive Summary ...",
-            "percent": 88,
+            "type": "progress", "phase": "summary", "percent": 88,
+            "message": f"Erstelle Executive Summary für {len(all_posts)} Posts (Claude Sonnet) ...",
         }
         try:
             summary = await self._claude.summarize(all_posts, config)
         except Exception as exc:
             summary = f"Zusammenfassung konnte nicht erstellt werden: {exc}"
+
+        # Analysis-Cache speichern (Posts mit Sentiment + Summary)
+        if config.cache_dir:
+            cache_path = self._make_cache_path("analysis")
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "meta": {"keywords": config.keywords, "days": config.days,
+                             "created_at": datetime.now(timezone.utc).isoformat()},
+                    "posts": [p.to_dict() for p in all_posts],
+                    "summary": summary,
+                }, f, ensure_ascii=False, indent=2)
+            yield {
+                "type": "progress", "phase": "cache", "percent": 99,
+                "message": f"Analysis-Cache gespeichert → {cache_path}",
+            }
 
         await self._claude.aclose()
 

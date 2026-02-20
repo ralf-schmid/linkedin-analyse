@@ -135,6 +135,39 @@ async def analyze_sync(
     return HTMLResponse(content=build_report(posts, summary, config))
 
 
+# ── CLI-Helpers ───────────────────────────────────────────────────────────────
+def _print_event(event: dict) -> None:
+    """Gibt ein SSE-Event lesbar auf der Konsole aus."""
+    pct = event.get("percent", 0)
+    msg = event["message"]
+    phase = event.get("phase", "")
+    if event["type"] == "progress":
+        if phase == "cache":
+            print(f"   💾 [{pct:3d}%] {msg}")
+        elif phase in ("sentiment_result",):
+            print(f"         {msg}")
+        else:
+            print(f"   ⏳ [{pct:3d}%] {msg}")
+    elif event["type"] == "warning":
+        print(f"   ⚠️  {msg}")
+    elif event["type"] == "error":
+        print(f"\n❌ {msg}", file=sys.stderr)
+
+
+def _save_report(event: dict, config: AnalysisConfig, output_path: str) -> None:
+    from .analyzer import Post
+    posts_raw = event["posts"]
+    summary = event["summary"]
+    posts = [Post(**{k: v for k, v in d.items() if k in Post.__dataclass_fields__})
+             for d in posts_raw]
+    html = build_report(posts, summary, config)
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(html, encoding="utf-8")
+    print(f"\n✅ Report gespeichert : {out}")
+    print(f"   Posts analysiert  : {len(posts)}")
+
+
 # ── CLI-Mode ──────────────────────────────────────────────────────────────────
 async def cli_main(args):
     config = AnalysisConfig(
@@ -142,29 +175,65 @@ async def cli_main(args):
         days=args.days,
         max_posts_per_keyword=args.max_posts,
         include_comments=not args.no_comments,
+        cache_dir=getattr(args, "save_cache", None),
     )
 
     print(f"\n🔍 LinkedIn Analyzer – CLI Mode")
     print(f"   Keywords : {', '.join(config.keywords)}")
     print(f"   Zeitraum : letzte {config.days} Tage")
-    print(f"   Max Posts: {config.max_posts_per_keyword} / Keyword\n")
+    print(f"   Max Posts: {config.max_posts_per_keyword} / Keyword")
+    if config.cache_dir:
+        print(f"   Cache-Dir: {config.cache_dir}")
+    print()
 
     analyzer = LinkedInAnalyzer(config)
     async for event in analyzer.run_stream():
-        if event["type"] == "progress":
-            print(f"   ⏳ {event['message']}")
+        if event["type"] in ("progress", "warning"):
+            _print_event(event)
         elif event["type"] == "done":
-            posts = event["posts"]
-            summary = event["summary"]
-            html = build_report(posts, summary, config)
-
-            out_path = Path(args.output)
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(html, encoding="utf-8")
-            print(f"\n✅ Report gespeichert: {out_path}")
-            print(f"   Posts analysiert : {len(posts)}")
+            _save_report(event, config, args.output)
         elif event["type"] == "error":
-            print(f"\n❌ Fehler: {event['message']}", file=sys.stderr)
+            _print_event(event)
+            sys.exit(1)
+
+
+# ── Debug-Mode ────────────────────────────────────────────────────────────────
+async def debug_main(args):
+    """Debug-Modus: lädt Zwischen-Cache statt echte API-Aufrufe zu starten."""
+    cache_file = args.from_analysis or args.from_scrape
+    try:
+        with open(cache_file, "r", encoding="utf-8") as f:
+            cache_data = json.load(f)
+    except Exception as exc:
+        print(f"\n❌ Cache-Datei konnte nicht geladen werden: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    meta = cache_data.get("meta", {})
+    keywords = meta.get("keywords") or ["(unbekannt)"]
+
+    print(f"\n🐛 LinkedIn Analyzer – Debug-Modus")
+    print(f"   Cache     : {cache_file}")
+    print(f"   Typ       : {'Analysis-Cache' if args.from_analysis else 'Scrape-Cache'}")
+    print(f"   Keywords  : {', '.join(keywords)}")
+    print(f"   Erstellt  : {meta.get('created_at', '?')}")
+    print(f"   Posts     : {len(cache_data.get('posts', []))}")
+    print()
+
+    config = AnalysisConfig(
+        keywords=keywords,
+        days=meta.get("days", 7),
+        from_scrape=args.from_scrape,
+        from_analysis=args.from_analysis,
+    )
+
+    analyzer = LinkedInAnalyzer(config)
+    async for event in analyzer.run_stream():
+        if event["type"] in ("progress", "warning"):
+            _print_event(event)
+        elif event["type"] == "done":
+            _save_report(event, config, args.output)
+        elif event["type"] == "error":
+            _print_event(event)
             sys.exit(1)
 
 
@@ -172,15 +241,26 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="LinkedIn Post Analyzer")
     sub = parser.add_subparsers(dest="cmd")
 
-    # CLI-Modus
+    # ── analyze: vollständige Analyse mit optionalem Cache-Speichern ──────────
     cli = sub.add_parser("analyze", help="Analyse ausführen und HTML-Datei speichern")
     cli.add_argument("--keywords", required=True, help='Kommagetrennt, z.B. "AI,LLM"')
     cli.add_argument("--days", type=int, default=7, help="Zeitraum in Tagen (default: 7)")
     cli.add_argument("--max-posts", type=int, default=25, help="Max Posts pro Keyword")
     cli.add_argument("--no-comments", action="store_true", help="Kommentare nicht laden")
-    cli.add_argument("--output", default="/output/report.html", help="Ausgabepfad")
+    cli.add_argument("--output", default="/output/report.html", help="Ausgabepfad des HTML-Reports")
+    cli.add_argument("--save-cache", metavar="DIR",
+                     help="Zwischenergebnisse in diesem Verzeichnis speichern (scrape_*.json + analysis_*.json)")
 
-    # Web-Server-Modus
+    # ── debug: Analyse aus Cache wiederholen (ohne API-Kosten) ────────────────
+    dbg = sub.add_parser("debug", help="Report aus gespeichertem Cache erstellen (keine API-Kosten)")
+    dbg_src = dbg.add_mutually_exclusive_group(required=True)
+    dbg_src.add_argument("--from-scrape", metavar="FILE",
+                         help="Scrape-Cache laden → Claude Sentiment + Summary werden neu berechnet")
+    dbg_src.add_argument("--from-analysis", metavar="FILE",
+                         help="Analysis-Cache laden → nur Report-Generierung, keine API-Aufrufe")
+    dbg.add_argument("--output", default="/output/report.html", help="Ausgabepfad des HTML-Reports")
+
+    # ── serve: Web-Server ─────────────────────────────────────────────────────
     serve = sub.add_parser("serve", help="Web-Server starten")
     serve.add_argument("--host", default="0.0.0.0")
     serve.add_argument("--port", type=int, default=8080)
@@ -189,6 +269,8 @@ if __name__ == "__main__":
 
     if args.cmd == "analyze":
         asyncio.run(cli_main(args))
+    elif args.cmd == "debug":
+        asyncio.run(debug_main(args))
     elif args.cmd == "serve":
         uvicorn.run("app.main:app", host=args.host, port=args.port, reload=False)
     else:
