@@ -283,6 +283,117 @@ class TestNormalizePost:
         assert post.posted_at == "2025-04-01T00:00:00Z"
 
 
+# ── Cache: Speichern und Laden ────────────────────────────────────────────────
+
+class TestCache:
+    """Prüft das Speichern und Laden von Scrape- und Analysis-Cache."""
+
+    def _base_post_dict(self, **kwargs) -> dict:
+        defaults = dict(
+            id="1", keyword="AI", author="Test", author_title="",
+            author_url="", text="Langer Testbeitrag mit ausreichend Inhalt.",
+            posted_at="2025-05-01", likes=5, comments=1, reposts=0, url="",
+            comments_list=[], sentiment_post="positiv", sentiment_score=0.5,
+            sentiment_comments="keine", main_topics=["KI"], summary="Test.",
+            notable_comment="",
+        )
+        defaults.update(kwargs)
+        return defaults
+
+    async def test_from_analysis_cache_skips_api_calls(self, tmp_path):
+        """from_analysis: Posts + Summary aus JSON laden, keine API-Aufrufe."""
+        cache_file = tmp_path / "analysis_test.json"
+        post_dict = self._base_post_dict()
+        cache_file.write_text(json.dumps({
+            "meta": {"keywords": ["AI"], "days": 7, "created_at": "2025-05-01T00:00:00Z"},
+            "posts": [post_dict],
+            "summary": "Cached Executive Summary.",
+        }), encoding="utf-8")
+
+        config = AnalysisConfig(keywords=["AI"], from_analysis=str(cache_file))
+        analyzer = LinkedInAnalyzer(config)
+
+        events = [e async for e in analyzer.run_stream()]
+        done = next(e for e in events if e["type"] == "done")
+
+        assert done["summary"] == "Cached Executive Summary."
+        assert len(done["posts"]) == 1
+        assert done["posts"][0]["author"] == "Test"
+
+    async def test_from_analysis_cache_error_on_missing_file(self, tmp_path):
+        config = AnalysisConfig(keywords=["AI"], from_analysis=str(tmp_path / "missing.json"))
+        analyzer = LinkedInAnalyzer(config)
+        events = [e async for e in analyzer.run_stream()]
+        assert any(e["type"] == "error" for e in events)
+
+    async def test_from_scrape_cache_skips_apify(self, tmp_path):
+        """from_scrape: Posts aus JSON laden, Apify überspringen, Claude mocken."""
+        cache_file = tmp_path / "scrape_test.json"
+        post_dict = self._base_post_dict(sentiment_post="neutral", sentiment_score=0.0,
+                                          main_topics=[], summary="", notable_comment="")
+        cache_file.write_text(json.dumps({
+            "meta": {"keywords": ["AI"], "days": 7, "created_at": "2025-05-01T00:00:00Z"},
+            "posts": [post_dict],
+        }), encoding="utf-8")
+
+        sentiment_result = {
+            "sentiment_post": "positiv", "sentiment_score": 0.9,
+            "sentiment_comments": "keine", "main_topics": ["KI"],
+            "summary": "Sehr gut.", "notable_comment": "",
+        }
+        config = AnalysisConfig(keywords=["AI"], from_scrape=str(cache_file))
+        analyzer = LinkedInAnalyzer(config)
+
+        with patch.object(analyzer._claude, "_post",
+                          new=AsyncMock(return_value=json.dumps(sentiment_result))):
+            events = [e async for e in analyzer.run_stream()]
+
+        done = next(e for e in events if e["type"] == "done")
+        assert len(done["posts"]) == 1
+        assert done["posts"][0]["sentiment_post"] == "positiv"
+
+    async def test_save_cache_creates_files(self, tmp_path):
+        """cache_dir: nach Analyse werden scrape_*.json und analysis_*.json angelegt."""
+        post_dict = self._base_post_dict()
+        sentiment_result = {
+            "sentiment_post": "neutral", "sentiment_score": 0.0,
+            "sentiment_comments": "keine", "main_topics": [],
+            "summary": "Ok.", "notable_comment": "",
+        }
+        config = AnalysisConfig(keywords=["AI"], cache_dir=str(tmp_path))
+        analyzer = LinkedInAnalyzer(config)
+
+        # Mock Apify + Claude
+        with patch.object(analyzer._apify, "scrape_linkedin",
+                          new=AsyncMock(return_value=[{
+                              "id": "1",
+                              "commentary": "Langer Testbeitrag mit ausreichend Inhalt.",
+                              "actor": {"name": "Test"},
+                              "numComments": 0, "numShares": 0,
+                              "reactionTypeCounts": [],
+                          }])), \
+             patch.object(analyzer._claude, "_post",
+                          new=AsyncMock(return_value=json.dumps(sentiment_result))):
+            events = [e async for e in analyzer.run_stream()]
+
+        json_files = list(tmp_path.glob("*.json"))
+        scrape_files = [f for f in json_files if f.name.startswith("scrape_")]
+        analysis_files = [f for f in json_files if f.name.startswith("analysis_")]
+
+        assert len(scrape_files) == 1, "scrape_*.json wurde nicht erstellt"
+        assert len(analysis_files) == 1, "analysis_*.json wurde nicht erstellt"
+
+        # Inhalt prüfen
+        scrape_data = json.loads(scrape_files[0].read_text())
+        assert "meta" in scrape_data
+        assert scrape_data["meta"]["keywords"] == ["AI"]
+        assert len(scrape_data["posts"]) == 1
+
+        analysis_data = json.loads(analysis_files[0].read_text())
+        assert "summary" in analysis_data
+        assert len(analysis_data["posts"]) == 1
+
+
 # ── AnthropicClient (gemockt) ─────────────────────────────────────────────────
 
 class TestAnthropicClientSentiment:
