@@ -1,4 +1,4 @@
-fac"""
+"""
 HTML-Report-Generator – erzeugt den fertigen Analysebericht
 """
 
