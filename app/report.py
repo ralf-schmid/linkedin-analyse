@@ -1,4 +1,4 @@
-"""
+fac"""
 HTML-Report-Generator – erzeugt den fertigen Analysebericht
 """
 
@@ -339,11 +339,12 @@ def build_report(posts: list, summary: str, config: AnalysisConfig) -> str:
       <span>🏷️ <b>{_esc(config.keywords_str)}</b></span>
       <span>📅 Letzte {config.days} Tage</span>
       <span>🕐 {now}</span>
+      <span>👤 Ralf Schmid</span>
     </div>
   </div>
 
   <div class="stats">
-    <div class="stat"><div class="num">{len(posts)}</div><div class="lbl">Posts (dedupliziert)</div></div>
+    <div class="stat"><div class="num">{len(posts)}</div><div class="lbl">Posts (Duplikate entfernt)</div></div>
     <div class="stat"><div class="num">{total_likes:,}</div><div class="lbl">Gesamte Likes</div></div>
     <div class="stat"><div class="num">{total_comments:,}</div><div class="lbl">Gesamte Kommentare</div></div>
     <div class="stat"><div class="num">{total_reposts:,}</div><div class="lbl">Gesamte Reposts</div></div>
