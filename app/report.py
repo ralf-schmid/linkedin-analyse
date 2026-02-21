@@ -366,8 +366,8 @@ def build_report(posts: list, summary: str, config: AnalysisConfig) -> str:
   </div>
 
   <div class="footer">
-    LinkedIn Post Analyzer &nbsp;|&nbsp; n8n-freie Docker-Lösung &nbsp;|&nbsp;
-    Powered by Apify + Claude &nbsp;|&nbsp; {now}
+    LinkedIn Post Analyzer &nbsp;|&nbsp;
+    Powered by Apify + Claude + Ralf Schmid&nbsp;|&nbsp; {now}
   </div>
 
 </div>
