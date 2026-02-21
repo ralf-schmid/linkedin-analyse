@@ -15,6 +15,7 @@ def _esc(s: str) -> str:
         .replace(">", "&gt;")
         .replace('"', "&quot;")
         .replace("'", "&#39;")
+        .replace("---", "<hr>")
     )
 
 
